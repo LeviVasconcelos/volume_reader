@@ -1,0 +1,37 @@
+# API Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Image Processing
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 3D Processing
+open3d>=0.17.0
+scipy>=1.11.0
+
+# Visualization (for debug tools)
+matplotlib>=3.7.0
+
+# Segmentation (SAM)
+torch>=2.0.0
+torchvision>=0.15.0
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
+
+# Job Management
+pydantic>=2.0.0
+uuid6>=2023.5.2
+
+# Utilities
+python-dateutil>=2.8.2
+aiofiles>=23.0.0
+
+# HTTP Client (for test client)
+requests>=2.31.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.25.0
