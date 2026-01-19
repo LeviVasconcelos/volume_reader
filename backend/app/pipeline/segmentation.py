@@ -1,13 +1,12 @@
 import asyncio
-from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 import numpy as np
 import torch
 
-from app.models import ClickPoint
+from app.models import ClickPoint, SegmentationPrompt, BoundingBox, BoardLandmarks
 
 
 # Global SAM model cache
@@ -75,40 +74,67 @@ def load_sam_model():
     return _sam_predictor
 
 
-def segment_single_image(
+def segment_with_prompts(
     image: np.ndarray,
-    click_point: tuple[float, float],
+    foreground_points: list[tuple[float, float]] = None,
+    background_points: list[tuple[float, float]] = None,
+    bounding_box: Optional[BoundingBox] = None,
 ) -> np.ndarray:
     """
-    Segment the surfboard in a single image using SAM.
+    Segment using SAM with multiple prompt types.
 
     Args:
         image: BGR image
-        click_point: Normalized (x, y) coordinates where user clicked
+        foreground_points: List of (x, y) normalized coords for foreground (board)
+        background_points: List of (x, y) normalized coords for background (not board)
+        bounding_box: Optional bounding box around the object
 
     Returns:
-        Binary mask where surfboard is 255, background is 0
+        Binary mask where object is 255, background is 0
     """
     predictor = load_sam_model()
 
     # Convert BGR to RGB for SAM
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    # Set the image
     predictor.set_image(image_rgb)
 
-    # Convert normalized coordinates to pixel coordinates
     h, w = image.shape[:2]
-    point_x = int(click_point[0] * w)
-    point_y = int(click_point[1] * h)
 
-    # Predict mask using point prompt
-    input_point = np.array([[point_x, point_y]])
-    input_label = np.array([1])  # 1 = foreground
+    # Build point prompts
+    input_points = []
+    input_labels = []
 
+    # Add foreground points (label = 1)
+    if foreground_points:
+        for (px, py) in foreground_points:
+            input_points.append([int(px * w), int(py * h)])
+            input_labels.append(1)
+
+    # Add background points (label = 0)
+    if background_points:
+        for (px, py) in background_points:
+            input_points.append([int(px * w), int(py * h)])
+            input_labels.append(0)
+
+    # Convert to numpy arrays
+    input_point_array = np.array(input_points) if input_points else None
+    input_label_array = np.array(input_labels) if input_labels else None
+
+    # Build box prompt
+    input_box = None
+    if bounding_box:
+        x1, y1, x2, y2 = bounding_box.to_pixels(w, h)
+        input_box = np.array([x1, y1, x2, y2])
+
+    # SAM requires at least one prompt
+    if input_point_array is None and input_box is None:
+        raise ValueError("At least one point or bounding box prompt is required")
+
+    # Predict mask
     masks, scores, _ = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
+        point_coords=input_point_array,
+        point_labels=input_label_array,
+        box=input_box,
         multimask_output=True,
     )
 
@@ -127,21 +153,197 @@ def segment_single_image(
     return mask_uint8
 
 
+def segment_single_image(
+    image: np.ndarray,
+    click_point: tuple[float, float],
+) -> np.ndarray:
+    """
+    Segment the surfboard in a single image using SAM (legacy single-point version).
+
+    Args:
+        image: BGR image
+        click_point: Normalized (x, y) coordinates where user clicked
+
+    Returns:
+        Binary mask where surfboard is 255, background is 0
+    """
+    return segment_with_prompts(
+        image,
+        foreground_points=[click_point],
+    )
+
+
+def segment_with_full_prompt(
+    image: np.ndarray,
+    prompt: SegmentationPrompt,
+) -> np.ndarray:
+    """
+    Segment using a full SegmentationPrompt with all available prompts.
+
+    Args:
+        image: BGR image
+        prompt: SegmentationPrompt with points, landmarks, box, etc.
+
+    Returns:
+        Binary mask
+    """
+    foreground_points = prompt.get_all_foreground_points()
+    background_points = prompt.background_points if prompt.background_points else None
+
+    return segment_with_prompts(
+        image,
+        foreground_points=foreground_points if foreground_points else None,
+        background_points=background_points,
+        bounding_box=prompt.bounding_box,
+    )
+
+
+def estimate_board_bbox_from_mask(mask: np.ndarray, padding: float = 0.05) -> BoundingBox:
+    """
+    Estimate bounding box from a segmentation mask.
+
+    Args:
+        mask: Binary mask
+        padding: Padding to add as fraction of dimensions
+
+    Returns:
+        BoundingBox with normalized coordinates
+    """
+    h, w = mask.shape[:2]
+
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        # Return center box as fallback
+        return BoundingBox(x_min=0.25, y_min=0.25, x_max=0.75, y_max=0.75)
+
+    # Get bounding rect of largest contour
+    largest = max(contours, key=cv2.contourArea)
+    x, y, bw, bh = cv2.boundingRect(largest)
+
+    # Add padding
+    pad_x = int(bw * padding)
+    pad_y = int(bh * padding)
+
+    x_min = max(0, x - pad_x) / w
+    y_min = max(0, y - pad_y) / h
+    x_max = min(w, x + bw + pad_x) / w
+    y_max = min(h, y + bh + pad_y) / h
+
+    return BoundingBox(x_min=x_min, y_min=y_min, x_max=x_max, y_max=y_max)
+
+
+def estimate_landmarks_from_mask(mask: np.ndarray) -> BoardLandmarks:
+    """
+    Estimate board landmark points from a segmentation mask.
+
+    Assumes surfboard is roughly vertical in image.
+
+    Args:
+        mask: Binary mask
+
+    Returns:
+        BoardLandmarks with estimated positions
+    """
+    h, w = mask.shape[:2]
+
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return BoardLandmarks(center=(0.5, 0.5))
+
+    # Get largest contour
+    largest = max(contours, key=cv2.contourArea)
+    points = largest.reshape(-1, 2)
+
+    # Find extremal points
+    top_idx = np.argmin(points[:, 1])
+    bottom_idx = np.argmax(points[:, 1])
+    left_idx = np.argmin(points[:, 0])
+    right_idx = np.argmax(points[:, 0])
+
+    # Centroid
+    M = cv2.moments(largest)
+    if M["m00"] > 0:
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+    else:
+        cx, cy = w / 2, h / 2
+
+    # Determine if board is more vertical or horizontal
+    bbox = cv2.boundingRect(largest)
+    is_vertical = bbox[3] > bbox[2]  # height > width
+
+    if is_vertical:
+        # Nose at top, tail at bottom
+        nose = points[top_idx]
+        tail = points[bottom_idx]
+        # Rails on sides at center height
+        mid_y = cy
+        left_rail_pts = points[np.abs(points[:, 1] - mid_y) < h * 0.1]
+        if len(left_rail_pts) > 0:
+            rail_left = left_rail_pts[np.argmin(left_rail_pts[:, 0])]
+            rail_right = left_rail_pts[np.argmax(left_rail_pts[:, 0])]
+        else:
+            rail_left = points[left_idx]
+            rail_right = points[right_idx]
+    else:
+        # Nose on left, tail on right (or vice versa)
+        nose = points[left_idx]
+        tail = points[right_idx]
+        # Rails on top/bottom
+        mid_x = cx
+        top_rail_pts = points[np.abs(points[:, 0] - mid_x) < w * 0.1]
+        if len(top_rail_pts) > 0:
+            rail_left = top_rail_pts[np.argmin(top_rail_pts[:, 1])]
+            rail_right = top_rail_pts[np.argmax(top_rail_pts[:, 1])]
+        else:
+            rail_left = points[top_idx]
+            rail_right = points[bottom_idx]
+
+    return BoardLandmarks(
+        nose=(float(nose[0] / w), float(nose[1] / h)),
+        tail=(float(tail[0] / w), float(tail[1] / h)),
+        rail_left=(float(rail_left[0] / w), float(rail_left[1] / h)),
+        rail_right=(float(rail_right[0] / w), float(rail_right[1] / h)),
+        center=(float(cx / w), float(cy / h)),
+    )
+
+
 def propagate_mask_to_other_images(
     reference_image: np.ndarray,
     reference_mask: np.ndarray,
     target_images: list[np.ndarray],
+    use_landmarks: bool = True,
 ) -> list[np.ndarray]:
     """
     Propagate segmentation from reference image to other images.
 
-    Uses feature matching to find corresponding regions in other views.
-    Falls back to SAM with estimated click points if matching fails.
+    Uses landmarks estimated from reference mask to guide segmentation
+    in other views.
+
+    Args:
+        reference_image: Reference image (BGR)
+        reference_mask: Reference segmentation mask
+        target_images: List of target images
+        use_landmarks: Whether to use estimated landmarks
+
+    Returns:
+        List of masks for target images
     """
-    predictor = load_sam_model()
     masks = []
 
-    # Find centroid of reference mask to use as approximate click point
+    # Estimate landmarks and bbox from reference
+    if use_landmarks:
+        landmarks = estimate_landmarks_from_mask(reference_mask)
+        bbox = estimate_board_bbox_from_mask(reference_mask, padding=0.1)
+    else:
+        landmarks = None
+        bbox = None
+
+    # Get centroid as fallback
     moments = cv2.moments(reference_mask)
     if moments["m00"] > 0:
         ref_cx = moments["m10"] / moments["m00"]
@@ -150,23 +352,23 @@ def propagate_mask_to_other_images(
         h, w = reference_mask.shape[:2]
         ref_cx, ref_cy = w / 2, h / 2
 
-    # Normalized reference centroid
     h, w = reference_image.shape[:2]
-    ref_norm_x = ref_cx / w
-    ref_norm_y = ref_cy / h
+    center_norm = (ref_cx / w, ref_cy / h)
 
     for target_image in target_images:
-        # Use SAM with estimated click point
-        # In a more sophisticated system, we'd use feature matching
-        # to find the corresponding point
-        target_h, target_w = target_image.shape[:2]
-
-        # For now, use same normalized position
-        # This works reasonably well if the board is roughly centered
-        mask = segment_single_image(
-            target_image,
-            (ref_norm_x, ref_norm_y),
-        )
+        if use_landmarks and landmarks:
+            # Use full prompt with landmarks and bbox
+            prompt = SegmentationPrompt(
+                landmarks=landmarks,
+                bounding_box=bbox,
+            )
+            mask = segment_with_full_prompt(target_image, prompt)
+        else:
+            # Fallback to single point
+            mask = segment_with_prompts(
+                target_image,
+                foreground_points=[center_norm],
+            )
         masks.append(mask)
 
     return masks
@@ -174,33 +376,44 @@ def propagate_mask_to_other_images(
 
 async def segment_board(
     images: list[np.ndarray],
-    click_point: ClickPoint,
+    prompt: Union[ClickPoint, SegmentationPrompt],
 ) -> list[np.ndarray]:
     """
     Segment the surfboard in all images.
 
-    Uses user click point on the specified image, then propagates
-    the segmentation to other views.
+    Supports both legacy ClickPoint and new SegmentationPrompt.
 
     Args:
         images: List of BGR images
-        click_point: User click point specifying which image and where
+        prompt: ClickPoint or SegmentationPrompt specifying how to segment
 
     Returns:
         List of binary masks for each image
     """
     loop = asyncio.get_event_loop()
 
-    # Segment the reference image (where user clicked)
-    reference_idx = click_point.image_index
-    reference_image = images[reference_idx]
+    # Handle legacy ClickPoint
+    if isinstance(prompt, ClickPoint):
+        reference_idx = prompt.image_index
+        reference_image = images[reference_idx]
 
-    reference_mask = await loop.run_in_executor(
-        None,
-        segment_single_image,
-        reference_image,
-        (click_point.x, click_point.y),
-    )
+        reference_mask = await loop.run_in_executor(
+            None,
+            segment_single_image,
+            reference_image,
+            (prompt.x, prompt.y),
+        )
+    else:
+        # Full SegmentationPrompt
+        reference_idx = prompt.image_index
+        reference_image = images[reference_idx]
+
+        reference_mask = await loop.run_in_executor(
+            None,
+            segment_with_full_prompt,
+            reference_image,
+            prompt,
+        )
 
     # Propagate to other images
     other_images = [img for i, img in enumerate(images) if i != reference_idx]
@@ -212,6 +425,7 @@ async def segment_board(
             reference_image,
             reference_mask,
             other_images,
+            True,  # use_landmarks
         )
 
         # Reconstruct full mask list in correct order
@@ -225,5 +439,55 @@ async def segment_board(
                 other_idx += 1
     else:
         masks = [reference_mask]
+
+    return masks
+
+
+async def segment_board_with_refinement(
+    images: list[np.ndarray],
+    initial_prompt: Union[ClickPoint, SegmentationPrompt],
+    refinement_iterations: int = 1,
+) -> list[np.ndarray]:
+    """
+    Segment with iterative refinement.
+
+    First pass uses initial prompt, subsequent passes use estimated
+    landmarks from previous masks for better coverage.
+
+    Args:
+        images: List of BGR images
+        initial_prompt: Initial segmentation prompt
+        refinement_iterations: Number of refinement passes
+
+    Returns:
+        List of refined masks
+    """
+    # Initial segmentation
+    masks = await segment_board(images, initial_prompt)
+
+    for _ in range(refinement_iterations):
+        refined_masks = []
+
+        for i, (image, mask) in enumerate(zip(images, masks)):
+            # Estimate landmarks from current mask
+            landmarks = estimate_landmarks_from_mask(mask)
+            bbox = estimate_board_bbox_from_mask(mask, padding=0.08)
+
+            # Re-segment with estimated prompts
+            prompt = SegmentationPrompt(
+                image_index=i,
+                landmarks=landmarks,
+                bounding_box=bbox,
+            )
+
+            new_mask = segment_with_full_prompt(image, prompt)
+
+            # Keep mask with larger area (assuming we're trying to capture full board)
+            if np.sum(new_mask > 127) > np.sum(mask > 127):
+                refined_masks.append(new_mask)
+            else:
+                refined_masks.append(mask)
+
+        masks = refined_masks
 
     return masks
