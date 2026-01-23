@@ -26,7 +26,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def parse_point(s: str) -> tuple[float, float]:

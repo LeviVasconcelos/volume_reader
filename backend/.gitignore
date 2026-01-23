@@ -1,0 +1,18 @@
+# Debug outputs (generated)
+debug_output/
+debug_sam_output/
+debug_sam_bbox/
+debug_sam_refine/
+
+# Sample data (too large for git)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store

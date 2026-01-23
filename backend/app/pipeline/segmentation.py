@@ -67,9 +67,11 @@ def load_sam_model():
             "https://github.com/facebookresearch/segment-anything#model-checkpoints"
         )
 
+    print(f"Loading SAM model ({model_type}) on device: {device}")
     _sam_model = sam_model_registry[model_type](checkpoint=str(checkpoint_path))
     _sam_model.to(device)
     _sam_predictor = SamPredictor(_sam_model)
+    print(f"SAM model loaded successfully")
 
     return _sam_predictor
 

@@ -21,8 +21,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+# Add backend directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from abc import ABC, abstractmethod
 from enum import Enum

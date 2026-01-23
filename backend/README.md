@@ -185,27 +185,27 @@ Test files:
 
 ### Integration Testing with Client Script
 
-The `client.py` script provides an easy way to test the full pipeline:
+The `tools/client.py` script provides an easy way to test the full pipeline:
 
 ```bash
 # Using user-provided dimensions
-python client.py ./surfboard_photos \
+python tools/client.py ./surfboard_photos \
   --length 1830 \
   --width 520 \
   --thickness 63
 
 # Using ArUco marker
-python client.py ./surfboard_photos \
+python tools/client.py ./surfboard_photos \
   --scale-method aruco \
   --aruco-id 42 \
   --aruco-size 50
 
 # Using credit card
-python client.py ./surfboard_photos \
+python tools/client.py ./surfboard_photos \
   --scale-method credit_card
 
 # Custom server URL
-python client.py ./surfboard_photos \
+python tools/client.py ./surfboard_photos \
   --url http://your-server:8000 \
   --length 1830
 ```
@@ -258,19 +258,19 @@ Using the interactive docs:
 
 ## Video to Images Conversion
 
-The `video_to_images.py` script extracts optimal frames from video for photogrammetry reconstruction. It supports both camera-moving and turntable (board-rotating) capture scenarios.
+The `tools/video_to_images.py` script extracts optimal frames from video for photogrammetry reconstruction. It supports both camera-moving and turntable (board-rotating) capture scenarios.
 
 ### Basic Usage
 
 ```bash
 # Extract frames from video
-python video_to_images.py surfboard_video.mp4 ./frames/
+python tools/video_to_images.py surfboard_video.mp4 ./frames/
 
 # Extract more frames with lower motion threshold
-python video_to_images.py video.mp4 ./output/ --min-motion 0.01 --max-frames 80
+python tools/video_to_images.py video.mp4 ./output/ --min-motion 0.01 --max-frames 80
 
 # Higher quality PNG output
-python video_to_images.py video.mp4 ./output/ --format png --min-sharpness 150
+python tools/video_to_images.py video.mp4 ./output/ --format png --min-sharpness 150
 ```
 
 ### Options
@@ -308,20 +308,26 @@ The script creates:
 ### Workflow
 
 1. Record video walking around the surfboard (camera-moving) or rotating the board on a turntable
-2. Run `video_to_images.py` to extract frames
-3. Use extracted frames with the volume calculation pipeline via `client.py`
+2. Run `tools/video_to_images.py` to extract frames
+3. Use extracted frames with the volume calculation pipeline via `tools/client.py`
 
 ```bash
 # Full workflow example
-python video_to_images.py surfboard.mp4 ./surfboard_frames/
-python client.py ./surfboard_frames --length 1830 --width 520 --thickness 63
+python tools/video_to_images.py surfboard.mp4 ./surfboard_frames/
+python tools/client.py ./surfboard_frames --length 1830 --width 520 --thickness 63
 ```
 
 ## Project Structure
 
 ```
 backend/
-├── app/
+├── README.md                 # Main documentation
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── .gitignore                # Ignores debug outputs, data/, venv/
+│
+├── app/                      # Core application
 │   ├── __init__.py
 │   ├── main.py              # FastAPI app and routes
 │   ├── models.py            # Pydantic request/response models
@@ -337,7 +343,22 @@ backend/
 │       ├── mesh.py          # Mesh generation
 │       ├── volume.py        # Volume calculation
 │       └── confidence.py    # Confidence scoring
-├── tests/
+│
+├── tools/                    # User-facing utilities
+│   ├── __init__.py
+│   ├── client.py            # API test client script
+│   └── video_to_images.py   # Video frame extraction script
+│
+├── scripts/                  # Debug & development scripts
+│   ├── __init__.py
+│   ├── run_debug_pipeline.py    # Run pipeline with debug output
+│   ├── debug_sam.py             # Debug SAM segmentation
+│   └── interactive_sam.py       # Interactive SAM GUI tool
+│
+├── models/                   # SAM model checkpoints
+│   └── sam_vit_h.pth
+│
+├── tests/                    # Unit tests
 │   ├── conftest.py          # Pytest fixtures
 │   ├── test_api.py
 │   ├── test_confidence.py
@@ -345,14 +366,14 @@ backend/
 │   ├── test_preprocess.py
 │   ├── test_scale.py
 │   └── test_volume.py
-├── models/                   # SAM model checkpoints
-│   └── sam_vit_h.pth
-├── client.py                 # Test client script
-├── video_to_images.py        # Video frame extraction script
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+│
+├── data/                     # Sample/test data (gitignored)
+│   └── surfboard_frames/    # Sample surfboard images
+│
+└── docs/                     # Additional documentation
+    ├── DEBUG_TOOLS_README.md
+    ├── INTERACTIVE_SAM_README.md
+    └── debug_tools_plan.md
 ```
 
 ## Configuration
