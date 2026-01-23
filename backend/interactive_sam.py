@@ -24,8 +24,74 @@ import numpy as np
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from abc import ABC, abstractmethod
+from enum import Enum
+
 from app.models import BoundingBox
 from app.pipeline.segmentation import segment_with_prompts
+
+
+class FeatureType(Enum):
+    """Available feature detector types."""
+    SIFT = "sift"
+    ORB = "orb"
+    AKAZE = "akaze"
+
+
+class FeatureDetector(ABC):
+    """Abstract base class for feature detectors."""
+    name: str  # For display
+
+    @abstractmethod
+    def detect(self, image: np.ndarray, mask: Optional[np.ndarray] = None
+               ) -> tuple[list[cv2.KeyPoint], Optional[np.ndarray]]:
+        """Detect keypoints and compute descriptors in image, optionally restricted to mask region."""
+        pass
+
+
+class SIFTDetector(FeatureDetector):
+    """SIFT feature detector."""
+    name = "SIFT"
+
+    def __init__(self, max_features: int = 2000):
+        self.detector = cv2.SIFT_create(nfeatures=max_features)
+
+    def detect(self, image: np.ndarray, mask: Optional[np.ndarray] = None
+               ) -> tuple[list[cv2.KeyPoint], Optional[np.ndarray]]:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask_u8 = mask.astype(np.uint8) if mask is not None else None
+        keypoints, descriptors = self.detector.detectAndCompute(gray, mask_u8)
+        return (keypoints if keypoints else [], descriptors)
+
+
+class ORBDetector(FeatureDetector):
+    """ORB feature detector."""
+    name = "ORB"
+
+    def __init__(self, max_features: int = 2000):
+        self.detector = cv2.ORB_create(nfeatures=max_features)
+
+    def detect(self, image: np.ndarray, mask: Optional[np.ndarray] = None
+               ) -> tuple[list[cv2.KeyPoint], Optional[np.ndarray]]:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask_u8 = mask.astype(np.uint8) if mask is not None else None
+        keypoints, descriptors = self.detector.detectAndCompute(gray, mask_u8)
+        return (keypoints if keypoints else [], descriptors)
+
+
+class AKAZEDetector(FeatureDetector):
+    """AKAZE feature detector."""
+    name = "AKAZE"
+
+    def __init__(self):
+        self.detector = cv2.AKAZE_create()
+
+    def detect(self, image: np.ndarray, mask: Optional[np.ndarray] = None
+               ) -> tuple[list[cv2.KeyPoint], Optional[np.ndarray]]:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask_u8 = mask.astype(np.uint8) if mask is not None else None
+        keypoints, descriptors = self.detector.detectAndCompute(gray, mask_u8)
+        return (keypoints if keypoints else [], descriptors)
 
 
 @dataclass
@@ -52,6 +118,7 @@ class InteractiveSAM:
     """Interactive SAM segmentation tool with OpenCV GUI."""
 
     WINDOW_NAME = "Interactive SAM Segmentation"
+    TRACKING_WINDOW_NAME = "Feature Tracking"
     MAX_DISPLAY_DIM = 1024  # Max dimension for display (keeps images manageable)
     POINT_RADIUS = 8
     POINT_COLOR = (0, 255, 0)  # Green (BGR)
@@ -70,6 +137,11 @@ class InteractiveSAM:
         self.display_images: list[np.ndarray] = []  # Scaled images for display
         self.annotations: dict[int, ImageAnnotation] = {}
         self.masks: dict[int, np.ndarray] = {}
+        self.keypoints: dict[int, list[cv2.KeyPoint]] = {}  # Per-image keypoints
+        self.descriptors: dict[int, np.ndarray] = {}  # Per-image descriptors
+        self.feature_detector: FeatureDetector = SIFTDetector()  # Current detector
+        self.show_keypoints: bool = True  # Toggle visibility
+        self.tracking_mode: bool = False  # Toggle for feature tracking
 
         self.current_idx = 0
         self.mode = "point"  # 'point' or 'bbox'
@@ -255,19 +327,28 @@ class InteractiveSAM:
             cv2.circle(img, (px, py), self.POINT_RADIUS, self.POINT_OUTLINE, -1)
             cv2.circle(img, (px, py), self.POINT_RADIUS - 2, self.POINT_COLOR, -1)
 
+        # Draw keypoints
+        if self.show_keypoints and self.current_idx in self.keypoints:
+            self._draw_keypoints(img)
+
         # Draw status bar (top)
         h, w = img.shape[:2]
         status_height = 30
         cv2.rectangle(img, (0, 0), (w, status_height), (40, 40, 40), -1)
         has_bbox = "Yes" if annotation.bounding_box else "No"
         has_mask = " | MASK" if self.current_idx in self.masks else ""
-        status_text = f"Mode: {self.mode.upper()} | Image {self.current_idx + 1}/{len(self.images)} | Points: {len(annotation.foreground_points)} | Bbox: {has_bbox}{has_mask}"
+        kp_info = ""
+        if self.current_idx in self.keypoints:
+            kp_count = len(self.keypoints[self.current_idx])
+            kp_info = f" | KP: {kp_count} ({self.feature_detector.name})"
+        tracking_status = " | TRACK" if self.tracking_mode else ""
+        status_text = f"Mode: {self.mode.upper()}{tracking_status} | Image {self.current_idx + 1}/{len(self.images)} | Points: {len(annotation.foreground_points)} | Bbox: {has_bbox}{has_mask}{kp_info}"
         cv2.putText(img, status_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # Draw help bar (bottom)
         help_height = 25
         cv2.rectangle(img, (0, h - help_height), (w, h), (40, 40, 40), -1)
-        help_text = "p:point b:bbox c:clear r:run s:save l:load <-/->:nav q:quit"
+        help_text = "p:point b:bbox c:clear r:run f:features t:track k:kp-toggle q:quit"
         cv2.putText(img, help_text, (10, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
         cv2.imshow(self.WINDOW_NAME, img)
@@ -304,6 +385,23 @@ class InteractiveSAM:
                 cv2.line(img, start_pt, end_pt, color, thickness)
             pos = end_pos
             drawing = not drawing
+
+    def _draw_keypoints(self, img: np.ndarray) -> None:
+        """Draw keypoints on display image."""
+        keypoints = self.keypoints.get(self.current_idx, [])
+        if not keypoints:
+            return
+
+        # Scale keypoints from original to display size
+        orig_h, orig_w = self.images[self.current_idx].shape[:2]
+        disp_h, disp_w = img.shape[:2]
+        scale_x, scale_y = disp_w / orig_w, disp_h / orig_h
+
+        for kp in keypoints:
+            x = int(kp.pt[0] * scale_x)
+            y = int(kp.pt[1] * scale_y)
+            cv2.circle(img, (x, y), 3, (255, 255, 0), -1)  # Cyan filled
+            cv2.circle(img, (x, y), 3, (0, 0, 0), 1)       # Black outline
 
     def _run_segmentation(self) -> None:
         """Run SAM segmentation on all annotated images."""
@@ -342,6 +440,103 @@ class InteractiveSAM:
 
         print("Segmentation complete!")
         self._render()
+
+    def _detect_features(self) -> None:
+        """Detect keypoints and descriptors for current image."""
+        image = self.images[self.current_idx]
+        mask = self.masks.get(self.current_idx)  # May be None
+
+        print(f"Detecting {self.feature_detector.name} features...")
+        keypoints, descriptors = self.feature_detector.detect(image, mask)
+
+        self.keypoints[self.current_idx] = keypoints
+        self.descriptors[self.current_idx] = descriptors if descriptors is not None else np.array([])
+
+        print(f"  Found {len(keypoints)} keypoints" +
+              (" (within mask)" if mask is not None else ""))
+        self._render()
+
+    def _scale_keypoints_to_display(self, idx: int) -> list[cv2.KeyPoint]:
+        """Scale keypoints from original image coordinates to display coordinates."""
+        keypoints = self.keypoints.get(idx, [])
+        if not keypoints:
+            return []
+
+        orig_h, orig_w = self.images[idx].shape[:2]
+        disp_h, disp_w = self.display_images[idx].shape[:2]
+        scale_x, scale_y = disp_w / orig_w, disp_h / orig_h
+
+        scaled = []
+        for kp in keypoints:
+            new_kp = cv2.KeyPoint(
+                x=kp.pt[0] * scale_x,
+                y=kp.pt[1] * scale_y,
+                size=kp.size * (scale_x + scale_y) / 2,
+                angle=kp.angle,
+                response=kp.response,
+                octave=kp.octave,
+                class_id=kp.class_id
+            )
+            scaled.append(new_kp)
+        return scaled
+
+    def _track_features(self, from_idx: int, to_idx: int) -> None:
+        """Track features from one image to another and display results."""
+        # Check if both images have descriptors
+        if from_idx not in self.descriptors or to_idx not in self.descriptors:
+            print(f"Cannot track: missing features for image {from_idx+1} or {to_idx+1}")
+            print("  Run feature detection (f) on both images first")
+            return
+
+        desc1 = self.descriptors[from_idx]
+        desc2 = self.descriptors[to_idx]
+
+        if desc1 is None or desc2 is None or desc1.size == 0 or desc2.size == 0:
+            print("Cannot track: one or both images have no descriptors")
+            return
+
+        # Check for SIFT (FLANN requires float descriptors)
+        if not isinstance(self.feature_detector, SIFTDetector):
+            print("Warning: Tracking requires SIFT features (FLANN uses float descriptors)")
+            print("  Switch to SIFT (press 1) and re-detect features")
+            return
+
+        # Import matching functions from pipeline
+        from app.pipeline.features import match_features, geometric_verification
+
+        print(f"Tracking features: image {from_idx+1} -> {to_idx+1}...")
+
+        # Match features
+        matches = match_features(desc1, desc2, ratio_threshold=0.75)
+        print(f"  Raw matches: {len(matches)}")
+
+        # Geometric verification
+        if len(matches) >= 8:
+            kp1 = self.keypoints[from_idx]
+            kp2 = self.keypoints[to_idx]
+            inlier_matches, _ = geometric_verification(kp1, kp2, matches, ransac_threshold=4.0)
+            print(f"  Inlier matches: {len(inlier_matches)}")
+        else:
+            inlier_matches = matches
+            print("  Too few matches for geometric verification")
+
+        # Create visualization
+        from app.pipeline.debug.features_debug import draw_feature_matches
+
+        img1 = self.display_images[from_idx]
+        img2 = self.display_images[to_idx]
+        kp1_scaled = self._scale_keypoints_to_display(from_idx)
+        kp2_scaled = self._scale_keypoints_to_display(to_idx)
+
+        vis = draw_feature_matches(img1, img2, kp1_scaled, kp2_scaled, inlier_matches, max_draw=100)
+
+        # Add status bar to visualization
+        h, w = vis.shape[:2]
+        cv2.rectangle(vis, (0, 0), (w, 30), (40, 40, 40), -1)
+        status = f"Image {from_idx+1} -> {to_idx+1} | Matches: {len(inlier_matches)}/{len(matches)} (inliers/total)"
+        cv2.putText(vis, status, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        cv2.imshow(self.TRACKING_WINDOW_NAME, vis)
 
     def _save_annotations(self, filepath: Optional[Path] = None) -> None:
         """Save annotations to JSON file."""
@@ -409,9 +604,15 @@ class InteractiveSAM:
         """Navigate to a different image."""
         new_idx = (self.current_idx + delta) % len(self.images)
         if new_idx != self.current_idx:
+            old_idx = self.current_idx
             self.current_idx = new_idx
             self.bbox_start = None
             self.is_dragging = False
+
+            # Track features if tracking mode is on
+            if self.tracking_mode:
+                self._track_features(old_idx, new_idx)
+
             self._render()
 
     def _clear_current(self) -> None:
@@ -419,6 +620,10 @@ class InteractiveSAM:
         self.annotations[self.current_idx] = ImageAnnotation()
         if self.current_idx in self.masks:
             del self.masks[self.current_idx]
+        if self.current_idx in self.keypoints:
+            del self.keypoints[self.current_idx]
+        if self.current_idx in self.descriptors:
+            del self.descriptors[self.current_idx]
         print(f"Cleared annotations for image {self.current_idx + 1}")
         self._render()
 
@@ -439,6 +644,10 @@ class InteractiveSAM:
         print("  s: Save annotations")
         print("  l: Load annotations")
         print("  m: Save masks (after segmentation)")
+        print("  f: Detect features (keypoints)")
+        print("  t: Toggle tracking mode")
+        print("  k: Toggle keypoint visibility")
+        print("  1/2/3: Switch detector (SIFT/ORB/AKAZE)")
         print("  q/Esc: Quit")
         print("=====================================\n")
 
@@ -465,11 +674,39 @@ class InteractiveSAM:
                 self._load_annotations()
             elif key == ord("m"):
                 self._save_masks()
+            elif key == ord("f"):
+                self._detect_features()
+            elif key == ord("t"):
+                self.tracking_mode = not self.tracking_mode
+                print(f"Tracking mode: {'ON' if self.tracking_mode else 'OFF'}")
+                if not self.tracking_mode:
+                    try:
+                        cv2.destroyWindow(self.TRACKING_WINDOW_NAME)
+                    except cv2.error:
+                        pass  # Window may not exist
+                self._render()
+            elif key == ord("k"):
+                self.show_keypoints = not self.show_keypoints
+                print(f"Keypoints: {'ON' if self.show_keypoints else 'OFF'}")
+                self._render()
+            elif key == ord("1"):
+                self.feature_detector = SIFTDetector()
+                print("Switched to SIFT detector")
+            elif key == ord("2"):
+                self.feature_detector = ORBDetector()
+                print("Switched to ORB detector")
+            elif key == ord("3"):
+                self.feature_detector = AKAZEDetector()
+                print("Switched to AKAZE detector")
             elif key == 81 or key == 2:  # Left arrow
                 self._navigate(-1)
             elif key == 83 or key == 3:  # Right arrow
                 self._navigate(1)
 
+        try:
+            cv2.destroyWindow(self.TRACKING_WINDOW_NAME)
+        except cv2.error:
+            pass
         cv2.destroyAllWindows()
 
 

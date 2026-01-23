@@ -35,6 +35,43 @@ python interactive_sam.py ./surfboard_frames/ --load annotations.json
 | `m` | Save masks to output directory |
 | `q` / `Esc` | Quit |
 
+## Feature Detection
+
+| Key | Action |
+|-----|--------|
+| `f` | Detect keypoints in current image |
+| `k` | Toggle keypoint visibility |
+| `1` | Use SIFT detector (default) |
+| `2` | Use ORB detector |
+| `3` | Use AKAZE detector |
+
+Keypoints are displayed as cyan dots. If a segmentation mask exists,
+keypoints are only detected within the masked region.
+
+## Feature Tracking
+
+| Key | Action |
+|-----|--------|
+| `t` | Toggle tracking mode |
+
+When tracking mode is enabled:
+- Navigating between images automatically matches features between the previous and current image
+- Matches are displayed in a separate "Feature Tracking" window (side-by-side view)
+- Uses FLANN-based matching with geometric verification (RANSAC)
+- Status shows match count (inliers/total)
+
+**Note:** Tracking requires SIFT features (FLANN uses float descriptors).
+ORB and AKAZE use binary descriptors which are not compatible with the FLANN matcher.
+If you attempt tracking with non-SIFT features, a warning will be displayed.
+
+### Tracking Workflow
+
+1. Press `f` to detect SIFT features on image 1
+2. Navigate to image 2 and press `f` to detect features
+3. Press `t` to enable tracking mode
+4. Navigate between images - tracking window will show feature matches
+5. Press `t` again to disable tracking mode and close the tracking window
+
 ## Mouse Actions
 
 **Point mode:**
