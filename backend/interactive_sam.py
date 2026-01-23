@@ -52,6 +52,7 @@ class InteractiveSAM:
     """Interactive SAM segmentation tool with OpenCV GUI."""
 
     WINDOW_NAME = "Interactive SAM Segmentation"
+    MAX_DISPLAY_DIM = 1024  # Max dimension for display (keeps images manageable)
     POINT_RADIUS = 8
     POINT_COLOR = (0, 255, 0)  # Green (BGR)
     POINT_OUTLINE = (255, 255, 255)  # White
@@ -65,7 +66,8 @@ class InteractiveSAM:
         self.image_dir = image_dir
         self.output_dir = output_dir
         self.image_paths: list[Path] = []
-        self.images: list[np.ndarray] = []
+        self.images: list[np.ndarray] = []  # Original full-res images (for SAM)
+        self.display_images: list[np.ndarray] = []  # Scaled images for display
         self.annotations: dict[int, ImageAnnotation] = {}
         self.masks: dict[int, np.ndarray] = {}
 
@@ -96,8 +98,24 @@ class InteractiveSAM:
                 print(f"Warning: Could not load {path}")
                 continue
             self.images.append(img)
+            self.display_images.append(self._resize_for_display(img))
 
         print(f"Loaded {len(self.images)} images successfully")
+        if self.images:
+            orig_h, orig_w = self.images[0].shape[:2]
+            disp_h, disp_w = self.display_images[0].shape[:2]
+            print(f"Original size: {orig_w}x{orig_h}, Display size: {disp_w}x{disp_h}")
+
+    def _resize_for_display(self, img: np.ndarray) -> np.ndarray:
+        """Resize image for display if it exceeds MAX_DISPLAY_DIM."""
+        h, w = img.shape[:2]
+        max_dim = max(h, w)
+        if max_dim <= self.MAX_DISPLAY_DIM:
+            return img.copy()
+        scale = self.MAX_DISPLAY_DIM / max_dim
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     def _setup_window(self) -> None:
         """Create OpenCV window and set up mouse callback."""
@@ -111,14 +129,14 @@ class InteractiveSAM:
         return self.annotations[idx]
 
     def _pixel_to_normalized(self, x: int, y: int) -> tuple[float, float]:
-        """Convert pixel coordinates to normalized (0-1)."""
-        img = self.images[self.current_idx]
+        """Convert display pixel coordinates to normalized (0-1)."""
+        img = self.display_images[self.current_idx]
         h, w = img.shape[:2]
         return (x / w, y / h)
 
     def _normalized_to_pixel(self, nx: float, ny: float) -> tuple[int, int]:
-        """Convert normalized coordinates to pixels."""
-        img = self.images[self.current_idx]
+        """Convert normalized coordinates to display pixels."""
+        img = self.display_images[self.current_idx]
         h, w = img.shape[:2]
         return (int(nx * w), int(ny * h))
 
@@ -205,14 +223,16 @@ class InteractiveSAM:
 
     def _render(self) -> None:
         """Render current frame with all overlays."""
-        img = self.images[self.current_idx].copy()
+        img = self.display_images[self.current_idx].copy()
         annotation = self._get_annotation(self.current_idx)
 
-        # Draw mask overlay if exists
+        # Draw mask overlay if exists (resize mask to display size)
         if self.current_idx in self.masks:
             mask = self.masks[self.current_idx]
+            disp_h, disp_w = img.shape[:2]
+            mask_resized = cv2.resize(mask, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
             overlay = np.zeros_like(img)
-            overlay[mask > 0] = self.MASK_COLOR
+            overlay[mask_resized > 0] = self.MASK_COLOR
             img = cv2.addWeighted(img, 1.0, overlay, self.MASK_ALPHA, 0)
 
         # Draw bounding box
